@@ -1,6 +1,26 @@
 #
 # Run tasks in a background process, passing the data they require via fork().
 #
+# Quick start:
+#
+#   import backtask
+#
+#   def a_task(arg, kwd=true):
+#     :
+#     :
+#
+#   def on_complete(result):
+#     a_task_return_value = result()
+#     if isinstance(a_task_return_value, backtask):
+#       # a_task raised the exception a_task_return_value.exc_info[]
+#     else:
+#       # a_task_return_value is the return value of a_task()
+#
+#   bt = backtask.BackgroundTasks()
+#   result = bt.submit_job(a_task, 1, kwd=false)
+#   result.on_complete(on_complete)
+#   
+#
 # (c) 2014 Russell Stuart
 #
 # This program is free software: you can redistribute it and/or modify
@@ -35,22 +55,24 @@ class RaisedException(object):
 
 class TaskResult(object):
     """
-       This is the return value of BackgroundTasks.submit_job().  It is
-       a function like object that when called returns TaskResult.RUNNING
-       until the task finishes, then TaskResult.task_completed() is called and
-       this returns the return value of the function passed to
-       BackgroundTasks.submit_job().  TaskResult.task_completed() may be called
-       from another thread if background_thread is set to True in
-       BackgroundTasks.  The default TaskResult.task_completed() does nothing.
+       BackgroundTasks.submit_task() returns an instance of this class.  This
+       is a function like object that when called returns TaskResult.RUNNING 
+       until the task completes, then it returns whatever the func given to
+       submit_task() returned.  If the func threw an exception instead of
+       returning normally this will be an instance of RaisedException.  The
+       function passed to set_on_complete() will be called when the task
+       completes.  It's one argument is this instance.  Beware that if
+       BackgroundTasks uses a background thread, this function may be called
+       from a thread.
     """
     RUNNING = object()
     __background_task = None
+    __notified = False
+    __on_complete = None
     __result = RUNNING
-    task_completed = None
 
     def __init__(self, background_task):
         self.__background_task = background_task
-        self.task_completed = lambda self: None
 
     def __call__(self):
         self.__background_task._dispatch()
@@ -59,9 +81,29 @@ class TaskResult(object):
         self.__background_task._lock.release()
         return result
 
-    def set_result(self, result):
+    def _set_result(self, result):
+        self.__background_task._lock.acquire()
         self.__result = result
-        self.task_completed(self)
+        on_complete = self.__on_complete
+        if on_complete is not None:
+            self.__notified = True
+        self.__background_task._lock.release()
+        if on_complete is not None:
+            on_complete(self)
+
+    def set_on_complete(self, on_complete):
+        self.__background_task._lock.acquire()
+        result = self.__result
+        self.__on_complete = on_complete
+        if result is not self.RUNNING and on_complete is not None:
+            if self.__notified:
+                on_complete = None
+            else:
+                self.__notified = True
+        self.__background_task._lock.release()
+        if on_complete is not None:
+            on_complete(self)
+            
 
 
 class BackgroundTasks(object):
@@ -87,7 +129,7 @@ class BackgroundTasks(object):
         self.__processes = {}
         self._lock = thread.allocate_lock()
         if background_thread:
-            self.__thread_pipe = self._pipe()
+            self.__thread_pipe = [self._nonblock(fd) for fd in os.pipe()]
             thread.start_new_thread(self._thread, ())
 
     def submit_task(self, func, *args, **kwds):
@@ -124,7 +166,7 @@ class BackgroundTasks(object):
         tasks = self.__queue[-task_count:]
         del self.__queue[-task_count:]
         self._lock.release()
-        pipe = self._pipe()
+        pipe = os.pipe()
         child_pid = os.fork()
         if child_pid == 0:
             # Releases resources that aren't relevant to us.
@@ -141,6 +183,7 @@ class BackgroundTasks(object):
             self._process_tasks(pipe[1], tasks)
         os.close(pipe[1])
         self._lock.acquire()
+        self._nonblock(pipe[0])
         self.__processes[pipe[0]] = (child_pid, [""])
         self._lock.release()
         if self.__thread_pipe is not None:
@@ -155,7 +198,7 @@ class BackgroundTasks(object):
             taskid, func, args, kwds = tasks.pop(0)
             try:
                 result = func(*args, **kwds)
-            except Exception, e:
+            except BaseException, e:
                 result = self.RaisedException(sys.exc_info())
             data = cPickle.dumps((taskid, result))
             length = "%0*x" % (self.__LEN, len(data))
@@ -165,15 +208,16 @@ class BackgroundTasks(object):
 
     def _poll(self):
         """Process any reports from the background tasks."""
+        set_results = []
         try:
             self._lock.acquire()
             while True:
                 if not self.__processes:
-                    return
+                    break
                 # Does anyone have anything to report?
                 ready, _, _ = select.select(list(self.__processes), [], [], 0)
                 if not ready:
-                    return
+                    break
                 for r in ready:
                     # Find the reporting process
                     child_pid, data_list = self.__processes[r]
@@ -200,11 +244,13 @@ class BackgroundTasks(object):
                         data_len = int(data_list[0], 16)
                         if data_list_len == data_len + self.__LEN:
                             tid, result = cPickle.loads(''.join(data_list[1:]))
-                            self.__results[tid].set_result(result)
-                            del self.__results[tid]
+                            task_result = self.__results.pop(tid)
+                            set_results.append((task_result, result))
                             data_list[:] = [""]
         finally:
             self._lock.release()
+        for task_result, result in set_results:
+            task_result._set_result(result)
 
     def _thread(self):
         """Fire off processes in the background."""
@@ -226,10 +272,9 @@ class BackgroundTasks(object):
             if rlist:
                 self._dispatch()
 
-    def _pipe(cls):
-        result = os.pipe()
-        for fd in result:
-            orig = fcntl.fcntl(fd, fcntl.F_GETFL)
-            fcntl.fcntl(fd, fcntl.F_SETFL, orig | os.O_NONBLOCK)
-        return result
-    _pipe = classmethod(_pipe)
+    def _nonblock(cls, fd):
+        """Make the passed file descriptor non blocking"""
+        orig = fcntl.fcntl(fd, fcntl.F_GETFL)
+        fcntl.fcntl(fd, fcntl.F_SETFL, orig | os.O_NONBLOCK)
+        return fd
+    _nonblock = classmethod(_nonblock)
