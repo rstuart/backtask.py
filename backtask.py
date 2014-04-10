@@ -1,7 +1,8 @@
-#
 # Run tasks in a background process, passing the data they require via fork().
 #
-# Quick start:
+#
+# Quick start
+# -----------
 #
 #   import backtask
 #
@@ -19,7 +20,13 @@
 #   bt = backtask.BackgroundTasks()
 #   result = bt.submit_job(a_task, 1, kwd=false)
 #   result.on_complete(on_complete)
-#   
+#
+#
+# Unit Test
+# ---------
+#
+#   python backtask.py
+#
 #
 # (c) 2014 Russell Stuart
 #
@@ -56,7 +63,7 @@ class RaisedException(object):
 class TaskResult(object):
     """
        BackgroundTasks.submit_task() returns an instance of this class.  This
-       is a function like object that when called returns TaskResult.RUNNING 
+       is a function like object that when called returns TaskResult.RUNNING
        until the task completes, then it returns whatever the func given to
        submit_task() returned.  If the func threw an exception instead of
        returning normally this will be an instance of RaisedException.  The
@@ -92,18 +99,20 @@ class TaskResult(object):
             on_complete(self)
 
     def set_on_complete(self, on_complete):
+        """
+            Arrange for on_complete to be called when the task completes.
+            It's one argument is this instance.
+        """
         self.__background_task._lock.acquire()
         result = self.__result
         self.__on_complete = on_complete
-        if result is not self.RUNNING and on_complete is not None:
-            if self.__notified:
-                on_complete = None
-            else:
-                self.__notified = True
+        if result is self.RUNNING or self.__notified:
+            on_complete = None
+        elif on_complete is not None:
+            self.__notified = True
         self.__background_task._lock.release()
         if on_complete is not None:
             on_complete(self)
-            
 
 
 class BackgroundTasks(object):
@@ -278,3 +287,28 @@ class BackgroundTasks(object):
         fcntl.fcntl(fd, fcntl.F_SETFL, orig | os.O_NONBLOCK)
         return fd
     _nonblock = classmethod(_nonblock)
+
+
+def unit_test():
+    """
+        Should print:
+
+        =====
+        Hi 0!
+        *****
+        Hi 1!
+        [0, 1, 2, 3, 4]
+    """
+    import time
+    b = BackgroundTasks()
+    r = [b.submit_task(lambda i: i, i) for i in range(5)]
+    r[0].set_on_complete(lambda _: sys.stdout.write('Hi 0!\n'))
+    print '====='
+    time.sleep(1)
+    print '*****'
+    r[1].set_on_complete(lambda _: sys.stdout.write('Hi 1!\n'))
+    z = [rr() for rr in r]
+    print z
+
+if __name__ == "__main__":
+    unit_test()
