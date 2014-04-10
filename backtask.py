@@ -172,8 +172,7 @@ class BackgroundTasks(object):
             task_count = len(self.__queue)
         else:
             task_count = len(self.__queue) // self.max_processes + 1
-        tasks = self.__queue[-task_count:]
-        del self.__queue[-task_count:]
+        tasks, self.__queue[:task_count] = self.__queue[:task_count], []
         self._lock.release()
         pipe = os.pipe()
         child_pid = os.fork()
