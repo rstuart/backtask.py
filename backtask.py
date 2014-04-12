@@ -231,14 +231,18 @@ class BackgroundTasks(object):
                     child_pid, data_list = self.__processes[r]
                     data_list_len = sum(len(d) for d in data_list)
                     if data_list_len < self.__LEN:
-                        # He is tell us how big the pickled results are
-                        d = os.read(r, self.__LEN - data_list_len)
-                        data_list[0] += d
+                        # He is telling us how big the pickled results are
+                        read_amount = self.__LEN - data_list_len
                     else:
                         # Read the pickled results.
                         data_len = int(data_list[0], 16)
-                        d = os.read(r, data_len + self.__LEN - data_list_len)
-                        data_list.append(d)
+                        read_amount = data_len + self.__LEN - data_list_len
+                    try:
+                        d = os.read(r, read_amount)
+                    except OSError, e:
+                        if e.errno == errno.EAGAIN:
+                            continue
+                        raise
                     # An empty read means the process has exited.
                     if not d:
                         os.close(r)
@@ -246,7 +250,12 @@ class BackgroundTasks(object):
                         del self.__processes[r]
                         if self.__thread_pipe is not None:
                             os.write(self.__thread_pipe[1], "e")
-                    data_list_len += len(d)
+                    else:
+                        if data_list_len < self.__LEN:
+                            data_list[0] += d
+                        else:
+                            data_list.append(d)
+                        data_list_len += len(d)
                     # If we have read all of the picked data, process it.
                     if data_list_len >= self.__LEN:
                         data_len = int(data_list[0], 16)
