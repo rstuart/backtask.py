@@ -19,14 +19,17 @@
 #
 #   bt = backtask.BackgroundTasks()
 #   result = bt.submit_job(a_task, 1, kwd=false)
-#   result.on_complete(on_complete)
+#   result.on_complete = on_complete
 #
 #
 # Unit Test
 # ---------
 #
-#   python backtask.py
+#   python backtask.py [coverage]
 #
+#   The "coverage" option overcomes some of the bugs in python-coverage,
+#   so that it reports close to 100%.  Unit test coverage is 100%, so
+#   it doesn't fix all the problems.
 #
 # (c) 2014 Russell Stuart
 #
@@ -62,20 +65,10 @@ class RaisedException(object):
 
     def __init__(self, exc_info):
         self.exception = exc_info[1]
-        backtrace = []
-        e = exc_info
-        while True:
-            string_file = cStringIO.StringIO()
-            traceback.print_exception(e[0], e[1], e[2], None, string_file)
-            lines = string_file.getvalue().splitlines()
-            if backtrace:
-                lines[:1] = ["", lines[0].replace("Traceback", "Caused by")]
-            backtrace.extend([l.rstrip() for l in lines])
-            cause = getattr(e[1], "cause", None)
-            if not cause or len(cause) != 3 or type(cause[2]) != type(e[2]):
-                break
-            e = cause
-        self.traceback = '\n'.join(backtrace) + "\n"
+        string_file = cStringIO.StringIO()
+        traceback.print_exception(
+                exc_info[0], exc_info[1], exc_info[2], None, string_file)
+        self.traceback = string_file.getvalue()
 
     def __repr__(self):
         return 'RaisedException(%r)' % (self.traceback,)
@@ -88,10 +81,10 @@ class TaskResult(object):
        until the task completes, then it returns whatever the func given to
        submit_task() returned.  If the func threw an exception instead of
        returning normally this will be an instance of RaisedException.  The
-       function passed to set_on_complete() will be called when the task
-       completes.  It's one argument is this instance.  Beware that if
-       BackgroundTasks uses a background thread, this function may be called
-       from a thread.
+       member on_complete can be set to a function that will be called when the
+       task completes.  It's one argument is this instance.  Beware that if
+       BackgroundTasks uses a background thread, the function may be called
+       from that thread.
     """
     RUNNING = object()
     __background_task = None
@@ -123,7 +116,7 @@ class TaskResult(object):
         if on_complete is not None:
             on_complete(self)
 
-    def set_on_complete(self, on_complete):
+    def on_complete(self, on_complete):
         """
             Arrange for on_complete to be called when the task completes.
             It's one argument is this instance.
@@ -140,9 +133,17 @@ class TaskResult(object):
             self.__background_task._lock.release()
         if on_complete is not None:
             on_complete(self)
+    on_complete = property(lambda self: self.__on_complete, on_complete)
 
 
 class BackgroundTasks(object):
+    """
+        Run tasks in a background worker.  The data is passed to the worker
+        using fork(), so it can be passed data that can't be pickled.
+        Tasks are started using BackgroundTasks.submit_task().  When you
+        are done with this object it should be disposed of using 
+        BackgroundTasks.close().  
+    """
     __LEN = 8
     max_processes = None
     _lock = None
@@ -154,7 +155,7 @@ class BackgroundTasks(object):
 
     def __init__(self, max_processes=1, background_thread=True):
         """
-          Create a new background tasks object.  map_processes is the
+          Create a new background tasks object.  max_processes is the
           maximum number of processes that can be running at once.
           If background_thread is True new tasks will be fired off by
           a background thread, otherwise we depend on clients polling
@@ -181,15 +182,12 @@ class BackgroundTasks(object):
         """
           Submit a new task to be run in the background.  The task is:
             result = func(*args, **kwds)
-          The return value is a function that will return TaskResult.RUNNING
-          until the result is known, thereafter the return value of func()
-          unless it raised an exception, and a RaisedException object if it
-          raise an exception.
+          The return value is a TaskResult object that can be interrogated
+          to find the return value of func(), when it becomes available.
         """
-        taskid = object()
+        result = TaskResult(self)
         self._lock.acquire()
         try:
-            result = TaskResult(self)
             self.__queue.append((id(result), func, args, kwds))
             self.__results[id(result)] = result
         finally:
@@ -197,13 +195,28 @@ class BackgroundTasks(object):
         self._dispatch()
         return result
 
+    def close(self):
+        """Shutdown nicely.  If you don't call this you may get
+        "sys.excepthook is missing" messages.   If you call this before
+        all tasks have completed the background tasks will fail with 
+        broken pipes."""
+        if self.__thread_pipe is not None:
+            os.close(self.__thread_pipe[1])
+            self.__thread_lock.acquire()
+            self.__thread_lock.release()
+            os.close(self.__thread_pipe[0])
+        for r in self.__processes:
+            os.close(r)
+
     def _dispatch(self):
         """See if any background tasks can be started."""
         self._poll()
         self._lock.acquire()
         try:
+            # Is there work to be done?
             if not self.__queue or len(self.__processes) == self.max_processes:
                 return
+            # Pass an appropriate amount of work to the background task.
             if self.max_processes == 1:
                 task_count = len(self.__queue)
             else:
@@ -211,25 +224,27 @@ class BackgroundTasks(object):
             tasks, self.__queue[:task_count] = self.__queue[:task_count], []
         finally:
             self._lock.release()
+        # fork() a new worker task
         pipe = os.pipe()
         child_pid = os.fork()
         if child_pid == 0:
-            # Releases resources that aren't relevant to us.
+            # Release resources that aren't relevant to the fork()'ed worker.
             self.__queue = None
             for r in self.__processes:
-                os.close(r)
+                self._close(r)
             self.__processes = None
-            if self.__thread_pipe is not None:
-                for h in self.__thread_pipe:
-                    os.close(h)
-                self.__thread_pipe = None
-            os.close(pipe[0])
+            for h in self.__thread_pipe or ():
+                self._close(h)
+            self.__thread_pipe = None
+            self._close(pipe[0])
             self.__results = None
             self._process_tasks(pipe[1], tasks)
+            self._close(pipe[1])
+            sys.exit(0)
         os.close(pipe[1])
+        self._nonblock(pipe[0])
         self._lock.acquire()
         try:
-            self._nonblock(pipe[0])
             self.__processes[pipe[0]] = (child_pid, [""])
         finally:
             self._lock.release()
@@ -242,16 +257,14 @@ class BackgroundTasks(object):
             process via out pipe.
         """
         while tasks:
-            taskid, func, args, kwds = tasks.pop(0)
+            result_id, func, args, kwds = tasks.pop(0)
             try:
                 result = func(*args, **kwds)
             except BaseException, e:
                 result = RaisedException(sys.exc_info())
-            data = cPickle.dumps((taskid, result))
+            data = cPickle.dumps((result_id, result))
             length = "%0*x" % (self.__LEN, len(data))
             os.write(pipe, length + data)
-        os.close(pipe)
-        sys.exit(0)
 
     def _poll(self):
         """Process any reports from the background tasks."""
@@ -276,12 +289,9 @@ class BackgroundTasks(object):
                         # Read the pickled results.
                         data_len = int(data_list[0], 16)
                         read_amount = data_len + self.__LEN - data_list_len
-                    try:
-                        d = os.read(r, read_amount)
-                    except OSError, e:
-                        if e.errno == errno.EAGAIN:
-                            continue
-                        raise
+                    d = self._read(r, read_amount)
+                    if d is None:
+                        continue
                     # An empty read means the process has exited.
                     if not d:
                         os.close(r)
@@ -305,11 +315,14 @@ class BackgroundTasks(object):
                             data_list[:] = [""]
         finally:
             self._lock.release()
+        # Delay calling _set_result until we are outside of the lock,
+        # so there is no chance of calling TaskResult.on_complete while
+        # owning the lock.
         for task_result, result in set_results:
             task_result._set_result(result)
 
     def _thread(self):
-        """Fire off processes in the background."""
+        """Fire off worker processes in the background."""
         # Tell main thread we have starteed.
         os.write(self.__thread_pipe[1], "s")
         self.__thread_lock.acquire()
@@ -320,23 +333,39 @@ class BackgroundTasks(object):
                 rlist = list(self.__processes) + [self.__thread_pipe[0]]
             finally:
                 self._lock.release()
-            # Wait until some child is ready, or the self._process changes.
+            # Wait until some child is ready, or the self.__process changes.
             ready, _, _ = select.select(rlist, [], [])
-            if self.__thread_pipe[0] in rlist:
-                rlist.remove(self.__thread_pipe[0])
+            if self.__thread_pipe[0] in ready:
+                ready.remove(self.__thread_pipe[0])
                 # Main thread closes the pipe to tell us to exit.
-                try:
-                    d = os.read(self.__thread_pipe[0], 1)
-                    if not d:
-                        break
-                except OSError, e:
-                    if e.errno != errno.EAGAIN:
-                        raise
-            if rlist:
+                if self._read(self.__thread_pipe[0], 1) == "":
+                    break
+            if ready:
                 self._dispatch()
-        os.close(self.__thread_pipe[0])
         # Tell main thread we have exited.
         self.__thread_lock.release()
+
+    def _read(cls, fd, max_byte_count):
+        """
+            Read from a non-blocking file descriptor,
+            returning NONE for EAGAIN
+        """
+        try:
+            return os.read(fd, max_byte_count)
+        except OSError, e:
+            if e.errno != errno.EAGAIN:
+                raise
+        return None
+    _read = classmethod(_read)
+
+    def _close(cls, fd):
+        """Close a file, ignore errors caused by it already being closed."""
+        try:
+            os.close(fd)
+        except OSError, e:
+            if e.errno != errno.EBADF:
+                raise
+    _close = classmethod(_close)
 
     def _nonblock(cls, fd):
         """Make the passed file descriptor non blocking"""
@@ -344,53 +373,99 @@ class BackgroundTasks(object):
         fcntl.fcntl(fd, fcntl.F_SETFL, orig | os.O_NONBLOCK)
     _nonblock = classmethod(_nonblock)
 
-    def task_count(self):
-        """Return the number of pending tasks."""
-        self._lock.acquire()
-        try:
-            return len(self.__results) + len(self.__queue)
-        finally:
-            self._lock.release()
 
-    def close(self):
-        """Shutdown nicely.  If you don't call this you may get
-        "sys.excepthook is missing" messages.   If you call this before
-        all tasks have completed the background tasks will fail with 
-        broken pipes."""
-        if self.__thread_pipe is not None:
-            os.close(self.__thread_pipe[1])
-            self.__thread_lock.acquire()
-            self.__thread_lock.release()
-        for r in self.__processes:
-            os.close(r)
-
-
+# -----------------------------------------------------------------------------
+#
+# Unit test.
+#
 def unit_test():
     """
-        Should print:
+        This is 100% code coverage unit test.  python-coverage doesn't
+        show 100% because it has bugs.  This test should print:
 
         =====
         Hi 0!
         *****
         Hi 1!
-        [0, 1, 2, 3, 4, RaisedException('...')]
+        [0, 1]
+        =====
+        Hi 2!
+        *****
+        Hi 3!
+        [0, 1, 2, 3, RaisedException('...')]
         Traceback (most recent call last):
-          :
-          :
+            :
+            :
         OSError: [Errno 32] Broken pipe
     """
+    class ErrorRaiser(object):
+        def os_raise(cls, errno):
+            e = OSError()
+            e.errno = errno
+            raise e
+        os_raise = classmethod(os_raise)
+    class NonblockReadTester(ErrorRaiser):
+        i = 0
+        read = os.read
+        def __call__(self, fd, byte_count):
+            self.i = (self.i + 1) % 2
+            if fcntl.fcntl(fd, fcntl.F_GETFL) & os.O_NONBLOCK and self.i == 0:
+                self.os_raise(errno.EAGAIN)
+            return self.read(fd, byte_count)
+    os.read = NonblockReadTester()
+    class BadCloseTester(ErrorRaiser):
+        i = 0
+        close = os.close
+        pid = os.getpid()
+        def __call__(self, fd):
+            self.i = (self.i + 1) % 2
+            self.close(fd)
+            if os.getpid() != self.pid and self.i == 0:
+                self.os_raise(errno.EBADF)
+    os.close = BadCloseTester()
     import time
     b = BackgroundTasks()
-    r = [b.submit_task(lambda i: i, i) for i in range(5)]
-    r.append(b.submit_task(lambda: 1 // 0))
-    r[0].set_on_complete(lambda _: sys.stdout.write('Hi 0!\n'))
+    r = [b.submit_task(lambda i: i, i) for i in range(2)]
+    r[0].on_complete = lambda _: sys.stdout.write('Hi 0!\n')
     sys.stdout.write('=====\n')
     time.sleep(1)
     sys.stdout.write('*****\n')
-    r[1].set_on_complete(lambda _: sys.stdout.write('Hi 1!\n'))
+    r[1].on_complete = lambda _: sys.stdout.write('Hi 1!\n')
+    sys.stdout.write("%r\n" % ([rr() for rr in r],))
+    b.close()
+    b = BackgroundTasks(2)
+    r = [b.submit_task(lambda i: time.sleep(0.5) or i, i) for i in range(4)]
+    r.append(b.submit_task(lambda: 1 // 0))
+    r[0].on_complete = lambda _: sys.stdout.write('Hi 2!\n')
+    sys.stdout.write('=====\n')
+    time.sleep(5)
+    sys.stdout.write('*****\n')
+    r[4].on_complete = lambda _: sys.stdout.write('Hi 3!\n')
     sys.stdout.write("%r\n" % ([rr() for rr in r],))
     r.append(b.submit_task(lambda: 1 // 0))
     b.close()
+    os.read = lambda fd, bytes: ErrorRaiser.os_raise(errno.EPERM)
+    try:
+        BackgroundTasks._read(0, 0)
+    except OSError, e:
+        pass
+    os.close = lambda fd: ErrorRaiser.os_raise(errno.EPERM)
+    try:
+        BackgroundTasks._close(0)
+    except OSError, e:
+        pass
+    sys.exit(0)
 
 if __name__ == "__main__":
+    # kludge for python-coverage.   it doesn't support the thread module, so
+    # emulate the bits we use with threading, which it does support.  Sadly
+    # this doesn't overcome all of python-coverage's bugs.
+    if len(sys.argv) == 2 and sys.argv[1] == 'coverage':
+        global thread
+        import threading
+        thread = type("thread", (object,), {})()
+        thread.allocate_lock = threading.Lock
+        thread.start_new_thread = (
+            lambda func, args, kwargs={}:
+            threading.Thread(target=func, args=args, kwargs=kwargs).start())
     unit_test()
