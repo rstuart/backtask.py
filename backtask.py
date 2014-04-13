@@ -39,25 +39,46 @@
 # to redistribute this program without the accompanying ""Installation
 # Information" described in clause 6.
 #
+import cPickle
+import cStringIO
 import errno
 import fcntl
-import cPickle
 import os
 import select
 import sys
 import thread
+import traceback
 
 
 class RaisedException(object):
     """
       This class is returned by TaskResult if the func passed to submit_job
-      raises and exception instead of returning normally.  It's one member
-      exc_info is the sys.exc_info() of the exception.
+      raises and exception instead of returning normally.  It's members are
+      exception, the BaseException raised, and traceback, the traceback (a
+      string).
     """
-    exc_info = None
+    exception = None
+    traceback = None
 
     def __init__(self, exc_info):
-        self.exc_info = exc_info
+        self.exception = exc_info[1]
+        backtrace = []
+        e = exc_info
+        while True:
+            string_file = cStringIO.StringIO()
+            traceback.print_exception(e[0], e[1], e[2], None, string_file)
+            lines = string_file.getvalue().splitlines()
+            if backtrace:
+                lines[:1] = ["", lines[0].replace("Traceback", "Caused by")]
+            backtrace.extend([l.rstrip() for l in lines])
+            cause = getattr(e[1], "cause", None)
+            if not cause or len(cause) != 3 or type(cause[2]) != type(e[2]):
+                break
+            e = cause
+        self.traceback = '\n'.join(backtrace) + "\n"
+
+    def __repr__(self):
+        return 'RaisedException(%r)' % (self.traceback,)
 
 
 class TaskResult(object):
@@ -84,17 +105,21 @@ class TaskResult(object):
     def __call__(self):
         self.__background_task._dispatch()
         self.__background_task._lock.acquire()
-        result = self.__result
-        self.__background_task._lock.release()
+        try:
+            result = self.__result
+        finally:
+            self.__background_task._lock.release()
         return result
 
     def _set_result(self, result):
         self.__background_task._lock.acquire()
-        self.__result = result
-        on_complete = self.__on_complete
-        if on_complete is not None:
-            self.__notified = True
-        self.__background_task._lock.release()
+        try:
+            self.__result = result
+            on_complete = self.__on_complete
+            if on_complete is not None:
+                self.__notified = True
+        finally:
+            self.__background_task._lock.release()
         if on_complete is not None:
             on_complete(self)
 
@@ -104,13 +129,15 @@ class TaskResult(object):
             It's one argument is this instance.
         """
         self.__background_task._lock.acquire()
-        result = self.__result
-        self.__on_complete = on_complete
-        if result is self.RUNNING or self.__notified:
-            on_complete = None
-        elif on_complete is not None:
-            self.__notified = True
-        self.__background_task._lock.release()
+        try:
+            result = self.__result
+            self.__on_complete = on_complete
+            if result is self.RUNNING or self.__notified:
+                on_complete = None
+            elif on_complete is not None:
+                self.__notified = True
+        finally:
+            self.__background_task._lock.release()
         if on_complete is not None:
             on_complete(self)
 
@@ -122,6 +149,7 @@ class BackgroundTasks(object):
     __queue = None
     __results = None
     __processes = None
+    __thread_lock = None
     __thread_pipe = None
 
     def __init__(self, max_processes=1, background_thread=True):
@@ -138,8 +166,16 @@ class BackgroundTasks(object):
         self.__processes = {}
         self._lock = thread.allocate_lock()
         if background_thread:
-            self.__thread_pipe = [self._nonblock(fd) for fd in os.pipe()]
-            thread.start_new_thread(self._thread, ())
+            self.__thread_lock = thread.allocate_lock()
+            self.__thread_lock.acquire()
+            try:
+                self.__thread_pipe = os.pipe()
+                thread.start_new_thread(self._thread, ())
+                # Wait the thread to start
+                os.read(self.__thread_pipe[0], 1)
+            finally:
+                self.__thread_lock.release()
+            self._nonblock(self.__thread_pipe[1])
 
     def submit_task(self, func, *args, **kwds):
         """
@@ -165,15 +201,16 @@ class BackgroundTasks(object):
         """See if any background tasks can be started."""
         self._poll()
         self._lock.acquire()
-        if not self.__queue or len(self.__processes) == self.max_processes:
+        try:
+            if not self.__queue or len(self.__processes) == self.max_processes:
+                return
+            if self.max_processes == 1:
+                task_count = len(self.__queue)
+            else:
+                task_count = len(self.__queue) // self.max_processes + 1
+            tasks, self.__queue[:task_count] = self.__queue[:task_count], []
+        finally:
             self._lock.release()
-            return
-        if self.max_processes == 1:
-            task_count = len(self.__queue)
-        else:
-            task_count = len(self.__queue) // self.max_processes + 1
-        tasks, self.__queue[:task_count] = self.__queue[:task_count], []
-        self._lock.release()
         pipe = os.pipe()
         child_pid = os.fork()
         if child_pid == 0:
@@ -182,7 +219,7 @@ class BackgroundTasks(object):
             for r in self.__processes:
                 os.close(r)
             self.__processes = None
-            if self.__thread_pipe:
+            if self.__thread_pipe is not None:
                 for h in self.__thread_pipe:
                     os.close(h)
                 self.__thread_pipe = None
@@ -191,9 +228,11 @@ class BackgroundTasks(object):
             self._process_tasks(pipe[1], tasks)
         os.close(pipe[1])
         self._lock.acquire()
-        self._nonblock(pipe[0])
-        self.__processes[pipe[0]] = (child_pid, [""])
-        self._lock.release()
+        try:
+            self._nonblock(pipe[0])
+            self.__processes[pipe[0]] = (child_pid, [""])
+        finally:
+            self._lock.release()
         if self.__thread_pipe is not None:
             os.write(self.__thread_pipe[1], "x")
 
@@ -207,7 +246,7 @@ class BackgroundTasks(object):
             try:
                 result = func(*args, **kwds)
             except BaseException, e:
-                result = self.RaisedException(sys.exc_info())
+                result = RaisedException(sys.exc_info())
             data = cPickle.dumps((taskid, result))
             length = "%0*x" % (self.__LEN, len(data))
             os.write(pipe, length + data)
@@ -271,30 +310,59 @@ class BackgroundTasks(object):
 
     def _thread(self):
         """Fire off processes in the background."""
+        # Tell main thread we have starteed.
+        os.write(self.__thread_pipe[1], "s")
+        self.__thread_lock.acquire()
+        self._nonblock(self.__thread_pipe[0])
         while True:
             self._lock.acquire()
-            rlist = list(self.__processes) + [self.__thread_pipe[0]]
-            self._lock.release()
+            try:
+                rlist = list(self.__processes) + [self.__thread_pipe[0]]
+            finally:
+                self._lock.release()
             # Wait until some child is ready, or the self._process changes.
             ready, _, _ = select.select(rlist, [], [])
             if self.__thread_pipe[0] in rlist:
                 rlist.remove(self.__thread_pipe[0])
+                # Main thread closes the pipe to tell us to exit.
                 try:
                     d = os.read(self.__thread_pipe[0], 1)
                     if not d:
-                        return
+                        break
                 except OSError, e:
                     if e.errno != errno.EAGAIN:
                         raise
             if rlist:
                 self._dispatch()
+        os.close(self.__thread_pipe[0])
+        # Tell main thread we have exited.
+        self.__thread_lock.release()
 
     def _nonblock(cls, fd):
         """Make the passed file descriptor non blocking"""
         orig = fcntl.fcntl(fd, fcntl.F_GETFL)
         fcntl.fcntl(fd, fcntl.F_SETFL, orig | os.O_NONBLOCK)
-        return fd
     _nonblock = classmethod(_nonblock)
+
+    def task_count(self):
+        """Return the number of pending tasks."""
+        self._lock.acquire()
+        try:
+            return len(self.__results) + len(self.__queue)
+        finally:
+            self._lock.release()
+
+    def close(self):
+        """Shutdown nicely.  If you don't call this you may get
+        "sys.excepthook is missing" messages.   If you call this before
+        all tasks have completed the background tasks will fail with 
+        broken pipes."""
+        if self.__thread_pipe is not None:
+            os.close(self.__thread_pipe[1])
+            self.__thread_lock.acquire()
+            self.__thread_lock.release()
+        for r in self.__processes:
+            os.close(r)
 
 
 def unit_test():
@@ -305,18 +373,24 @@ def unit_test():
         Hi 0!
         *****
         Hi 1!
-        [0, 1, 2, 3, 4]
+        [0, 1, 2, 3, 4, RaisedException('...')]
+        Traceback (most recent call last):
+          :
+          :
+        OSError: [Errno 32] Broken pipe
     """
     import time
     b = BackgroundTasks()
     r = [b.submit_task(lambda i: i, i) for i in range(5)]
+    r.append(b.submit_task(lambda: 1 // 0))
     r[0].set_on_complete(lambda _: sys.stdout.write('Hi 0!\n'))
-    print '====='
+    sys.stdout.write('=====\n')
     time.sleep(1)
-    print '*****'
+    sys.stdout.write('*****\n')
     r[1].set_on_complete(lambda _: sys.stdout.write('Hi 1!\n'))
-    z = [rr() for rr in r]
-    print z
+    sys.stdout.write("%r\n" % ([rr() for rr in r],))
+    r.append(b.submit_task(lambda: 1 // 0))
+    b.close()
 
 if __name__ == "__main__":
     unit_test()
