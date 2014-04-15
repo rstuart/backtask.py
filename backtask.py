@@ -188,7 +188,7 @@ class BackgroundTasks(object):
           Normally if the submitting process exits before the result can
           be reported the worker process will raise a "Broken Pipe" OSError,
           after processing all tasks it has been given.  If the func()
-          returns BackgroundTasks.NO_RESULT then failure to it report doesn't
+          returns BackgroundTasks.NO_RESULT then failure to report it doesn't
           result in a broken pipe.
         """
         result = TaskResult(self)
