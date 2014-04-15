@@ -141,8 +141,8 @@ class BackgroundTasks(object):
         Run tasks in a background worker.  The data is passed to the worker
         using fork(), so it can be passed data that can't be pickled.
         Tasks are started using BackgroundTasks.submit_task().  When you
-        are done with this object it should be disposed of using 
-        BackgroundTasks.close().  
+        are done with this object it should be disposed of using
+        BackgroundTasks.close().
     """
     NO_RESULT = object()
     max_processes = None
@@ -204,7 +204,7 @@ class BackgroundTasks(object):
     def close(self):
         """Shutdown nicely.  If you don't call this you may get
         "sys.excepthook is missing" messages.   If you call this before
-        all tasks have completed the background tasks will fail with 
+        all tasks have completed the background tasks will fail with
         broken pipes."""
         if self.__thread_pipe is not None:
             os.close(self.__thread_pipe[1])
@@ -418,29 +418,35 @@ def unit_test():
         OSError: [Errno 32] Broken pipe
     """
     class ErrorRaiser(object):
+
         def os_raise(cls, errno):
             e = OSError()
             e.errno = errno
             raise e
         os_raise = classmethod(os_raise)
+
     class NonblockReadTester(ErrorRaiser):
         i = 0
         read = os.read
+
         def __call__(self, fd, byte_count):
             self.i = (self.i + 1) % 2
             if fcntl.fcntl(fd, fcntl.F_GETFL) & os.O_NONBLOCK and self.i == 0:
                 self.os_raise(errno.EAGAIN)
             return self.read(fd, byte_count)
     os.read = NonblockReadTester()
+
     class BadCloseTester(ErrorRaiser):
         i = 0
         close = os.close
         pid = os.getpid()
+
         def __call__(self, fd):
             self.i = (self.i + 1) % 2
             self.close(fd)
             if os.getpid() != self.pid and self.i == 0:
                 self.os_raise(errno.EBADF)
+
     os.close = BadCloseTester()
     import time
     b = BackgroundTasks()
