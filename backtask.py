@@ -205,8 +205,11 @@ class BackgroundTasks(object):
             self.__thread_lock.acquire()
             self.__thread_lock.release()
             os.close(self.__thread_pipe[0])
-        for r in self.__processes:
-            os.close(r)
+            self.__thread_pipe = None
+        if self.__processes:
+            for r in self.__processes:
+                os.close(r)
+            self.__processes = None
 
     def _dispatch(self):
         """See if any background tasks can be started."""
@@ -256,6 +259,7 @@ class BackgroundTasks(object):
             Process the tasks passed, and report the results to the parent
             process via out pipe.
         """
+        exc_info = None
         while tasks:
             result_id, func, args, kwds = tasks.pop(0)
             try:
@@ -264,7 +268,16 @@ class BackgroundTasks(object):
                 result = RaisedException(sys.exc_info())
             data = cPickle.dumps((result_id, result))
             length = "%0*x" % (self.__LEN, len(data))
-            os.write(pipe, length + data)
+            # If the listening process has died just continue.
+            try:
+                os.write(pipe, length + data)
+            except OSError, e:
+                if e.errno != errno.EPIPE:
+                    raise
+                if exc_info is None:
+                    exc_info = sys.exc_info()
+        if exc_info is not None:
+            raise exc_info[0], exc_info[1], exc_info[2]
 
     def _poll(self):
         """Process any reports from the background tasks."""
@@ -433,8 +446,9 @@ def unit_test():
     r[1].on_complete = lambda _: sys.stdout.write('Hi 1!\n')
     sys.stdout.write("%r\n" % ([rr() for rr in r],))
     b.close()
+    b.close()
     b = BackgroundTasks(2)
-    r = [b.submit_task(lambda i: time.sleep(0.5) or i, i) for i in range(4)]
+    r = [b.submit_task(lambda i: time.sleep(0.1) or i, i) for i in range(4)]
     r.append(b.submit_task(lambda: 1 // 0))
     r[0].on_complete = lambda _: sys.stdout.write('Hi 2!\n')
     sys.stdout.write('=====\n')
@@ -454,6 +468,12 @@ def unit_test():
         BackgroundTasks._close(0)
     except OSError, e:
         pass
+    b = BackgroundTasks(background_thread=False)
+    try:
+        b._process_tasks(-1, [(0, lambda: None, (), {})])
+    except OSError, e:
+        pass
+    b.close()
     sys.exit(0)
 
 if __name__ == "__main__":
