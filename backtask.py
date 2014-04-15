@@ -145,8 +145,8 @@ class BackgroundTasks(object):
         BackgroundTasks.close().  
     """
     NO_RESULT = object()
-    __LEN = 8
     max_processes = None
+    __LEN = 8
     _lock = None
     __queue = None
     __results = None
@@ -188,7 +188,7 @@ class BackgroundTasks(object):
           Normally if the submitting process exits before the result can
           be reported the worker process will raise a "Broken Pipe" OSError,
           after processing all tasks it has been given.  If the func()
-          returns BackgroundTasks.NO_RESULT failure to report it doesn't
+          returns BackgroundTasks.NO_RESULT then failure to it report doesn't
           result in a broken pipe.
         """
         result = TaskResult(self)
@@ -249,7 +249,7 @@ class BackgroundTasks(object):
             self.__results = None
             self._process_tasks(pipe[1], tasks)
             self._close(pipe[1])
-            sys.exit(0)
+            sys._exit(0)                # Ensure nobody does unwanted cleanup.
         os.close(pipe[1])
         self._nonblock(pipe[0])
         self._lock.acquire()
