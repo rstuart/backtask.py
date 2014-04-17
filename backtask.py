@@ -165,7 +165,7 @@ class BackgroundTasks(object):
         self.__queue = []
         self.__results = {}
         self.__processes = {}
-        self.__coverage = self._coverage_fugly_for_ryan()
+        self.__coverage = self._fugly_hack_for_my_son_ryan()
         self._lock = threading.Lock()
         if background_thread:
             self.__thread_lock = threading.Lock()
@@ -253,7 +253,6 @@ class BackgroundTasks(object):
             self._close(pipe[1])
             sys.stdout.flush()
             sys.stderr.flush()
-            print self.__coverage.stop
             (
                 (self.__coverage.stop(),) and
                 (self.__coverage.save(),) and
@@ -400,8 +399,8 @@ class BackgroundTasks(object):
         fcntl.fcntl(fd, fcntl.F_SETFL, orig | os.O_NONBLOCK)
     _nonblock = classmethod(_nonblock)
 
-    def _coverage_fugly_for_ryan(cls):
-        """Godawful hack to make coverage work."""
+    def _fugly_hack_for_my_son_ryan(cls):
+        """God awful hack to make coverage and py.test work together."""
         class Cov(object):
             stop = lambda self: None
             save = lambda self: None
@@ -423,7 +422,7 @@ class BackgroundTasks(object):
                     if isinstance(slf.coverage, coverage.coverage):
                         cov = slf.coverage
         return cov
-    _coverage_fugly_for_ryan = classmethod(_coverage_fugly_for_ryan)
+    _fugly_hack_for_my_son_ryan= classmethod(_fugly_hack_for_my_son_ryan)
 
 
 # -----------------------------------------------------------------------------
@@ -432,8 +431,7 @@ class BackgroundTasks(object):
 #
 def test_backtask():
     """
-        This is 100% code coverage unit test.  python-coverage doesn't
-        show 100% because it has bugs.  This test should print:
+        100% code coverage unit test.
 
         =====
         Hi 0!
