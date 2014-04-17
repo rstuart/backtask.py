@@ -25,11 +25,10 @@
 # Unit Test
 # ---------
 #
-#   python backtask.py [coverage]
+#   python backtask.py
 #
-#   The "coverage" option overcomes some of the bugs in python-coverage,
-#   so that it reports close to 100%.  Unit test coverage is 100%, so
-#   it doesn't fix all the problems.
+#   When testing with coverage, use "run --parallel-mode" and then
+#   run again with the "combine" option.
 #
 # (c) 2014 Russell Stuart
 #
@@ -49,7 +48,7 @@ import fcntl
 import os
 import select
 import sys
-import thread
+import threading
 import traceback
 
 
@@ -166,13 +165,13 @@ class BackgroundTasks(object):
         self.__queue = []
         self.__results = {}
         self.__processes = {}
-        self._lock = thread.allocate_lock()
+        self._lock = threading.Lock()
         if background_thread:
-            self.__thread_lock = thread.allocate_lock()
+            self.__thread_lock = threading.Lock()
             self.__thread_lock.acquire()
             try:
                 self.__thread_pipe = os.pipe()
-                thread.start_new_thread(self._thread, ())
+                threading.Thread(target=self._thread).start()
                 # Wait the thread to start
                 os.read(self.__thread_pipe[0], 1)
             finally:
@@ -247,9 +246,13 @@ class BackgroundTasks(object):
             self.__thread_pipe = None
             self._close(pipe[0])
             self.__results = None
+            sys.stdin.close()
+            sys.stdin = open(os.devnull)
             self._process_tasks(pipe[1], tasks)
             self._close(pipe[1])
-            sys._exit(0)                # Ensure nobody does unwanted cleanup.
+            sys.stdout.flush()
+            sys.stderr.flush()
+            (sys.exit if "coverage" in sys.modules else os._exit)(0)
         os.close(pipe[1])
         self._nonblock(pipe[0])
         self._lock.acquire()
@@ -489,15 +492,4 @@ def unit_test():
     sys.exit(0)
 
 if __name__ == "__main__":
-    # kludge for python-coverage.   it doesn't support the thread module, so
-    # emulate the bits we use with threading, which it does support.  Sadly
-    # this doesn't overcome all of python-coverage's bugs.
-    if len(sys.argv) == 2 and sys.argv[1] == 'coverage':
-        global thread
-        import threading
-        thread = type("thread", (object,), {})()
-        thread.allocate_lock = threading.Lock
-        thread.start_new_thread = (
-            lambda func, args, kwargs={}:
-            threading.Thread(target=func, args=args, kwargs=kwargs).start())
     unit_test()
