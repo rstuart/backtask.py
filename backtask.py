@@ -165,6 +165,7 @@ class BackgroundTasks(object):
         self.__queue = []
         self.__results = {}
         self.__processes = {}
+        self.__coverage = self._coverage_fugly_for_ryan()
         self._lock = threading.Lock()
         if background_thread:
             self.__thread_lock = threading.Lock()
@@ -252,7 +253,11 @@ class BackgroundTasks(object):
             self._close(pipe[1])
             sys.stdout.flush()
             sys.stderr.flush()
-            (sys.exit if "coverage" in sys.modules else os._exit)(0)
+            print self.__coverage.stop
+            (
+                (self.__coverage.stop(),) and
+                (self.__coverage.save(),) and
+                os._exit(0))
         os.close(pipe[1])
         self._nonblock(pipe[0])
         self._lock.acquire()
@@ -395,12 +400,37 @@ class BackgroundTasks(object):
         fcntl.fcntl(fd, fcntl.F_SETFL, orig | os.O_NONBLOCK)
     _nonblock = classmethod(_nonblock)
 
+    def _coverage_fugly_for_ryan(cls):
+        """Godawful hack to make coverage work."""
+        class Cov(object):
+            stop = lambda self: None
+            save = lambda self: None
+        cov = Cov()
+        if "coverage" in sys.modules:
+            import coverage
+            try:
+                raise ZeroDivisionError
+            except ZeroDivisionError:
+                f = sys.exc_info()[2].tb_frame
+            tb = []
+            while f:
+                tb.append(f)
+                f = f.f_back
+            t = tb[-3]
+            if 'self' in t.f_locals:
+                slf = t.f_locals['self']
+                if hasattr(slf, "coverage"):
+                    if isinstance(slf.coverage, coverage.coverage):
+                        cov = slf.coverage
+        return cov
+    _coverage_fugly_for_ryan = classmethod(_coverage_fugly_for_ryan)
+
 
 # -----------------------------------------------------------------------------
 #
 # Unit test.
 #
-def unit_test():
+def test_backtask():
     """
         This is 100% code coverage unit test.  python-coverage doesn't
         show 100% because it has bugs.  This test should print:
@@ -415,10 +445,6 @@ def unit_test():
         *****
         Hi 3!
         [0, 1, 2, 3, RaisedException('...')]
-        Traceback (most recent call last):
-            :
-            :
-        OSError: [Errno 32] Broken pipe
     """
     class ErrorRaiser(object):
 
@@ -437,7 +463,7 @@ def unit_test():
             if fcntl.fcntl(fd, fcntl.F_GETFL) & os.O_NONBLOCK and self.i == 0:
                 self.os_raise(errno.EAGAIN)
             return self.read(fd, byte_count)
-    os.read = NonblockReadTester()
+    save_os_read, os.read = os.read, NonblockReadTester()
 
     class BadCloseTester(ErrorRaiser):
         i = 0
@@ -449,47 +475,50 @@ def unit_test():
             self.close(fd)
             if os.getpid() != self.pid and self.i == 0:
                 self.os_raise(errno.EBADF)
+    save_os_close, os.close = os.close, BadCloseTester()
 
-    os.close = BadCloseTester()
-    import time
-    b = BackgroundTasks()
-    r = [b.submit_task(lambda i: i, i) for i in range(2)]
-    r[0].on_complete = lambda _: sys.stdout.write('Hi 0!\n')
-    sys.stdout.write('=====\n')
-    time.sleep(1)
-    sys.stdout.write('*****\n')
-    r[1].on_complete = lambda _: sys.stdout.write('Hi 1!\n')
-    sys.stdout.write("%r\n" % ([rr() for rr in r],))
-    b.close()
-    b.close()
-    b = BackgroundTasks(2)
-    r = [b.submit_task(lambda i: time.sleep(0.1) or i, i) for i in range(4)]
-    r.append(b.submit_task(lambda: 1 // 0))
-    r[0].on_complete = lambda _: sys.stdout.write('Hi 2!\n')
-    sys.stdout.write('=====\n')
-    time.sleep(5)
-    sys.stdout.write('*****\n')
-    r[4].on_complete = lambda _: sys.stdout.write('Hi 3!\n')
-    sys.stdout.write("%r\n" % ([rr() for rr in r],))
-    r.append(b.submit_task(lambda: 1 // 0))
-    b.close()
-    os.read = lambda fd, bytes: ErrorRaiser.os_raise(errno.EPERM)
     try:
-        BackgroundTasks._read(0, 0)
+        import time
+        b = BackgroundTasks()
+        r = [b.submit_task(lambda i: i, i) for i in range(2)]
+        r[0].on_complete = lambda _: sys.stdout.write('Hi 0!\n')
+        sys.stdout.write('=====\n')
+        time.sleep(1)
+        sys.stdout.write('*****\n')
+        r[1].on_complete = lambda _: sys.stdout.write('Hi 1!\n')
+        sys.stdout.write("%r\n" % ([rr() for rr in r],))
+        b.close()
+        b.close()
+        b = BackgroundTasks(2)
+        r = [b.submit_task(lambda i: time.sleep(0.1) or i, i) for i in range(4)]
+        r.append(b.submit_task(lambda: 1 // 0))
+        r[0].on_complete = lambda _: sys.stdout.write('Hi 2!\n')
+        sys.stdout.write('=====\n')
+        time.sleep(5)
+        sys.stdout.write('*****\n')
+        r[4].on_complete = lambda _: sys.stdout.write('Hi 3!\n')
+        sys.stdout.write("%r\n" % ([rr() for rr in r],))
+        r.append(b.submit_task(lambda: 1 // 0))
+        b.close()
+        os.read = lambda fd, bytes: ErrorRaiser.os_raise(errno.EPERM)
+        try:
+            BackgroundTasks._read(0, 0)
+        except OSError, e:
+            pass
+        os.close = lambda fd: ErrorRaiser.os_raise(errno.EPERM)
+        try:
+            BackgroundTasks._close(0)
+        except OSError, e:
+            pass
+        b = BackgroundTasks(background_thread=False)
+        try:
+            b._process_tasks(-1, [(0, lambda: None, (), {})])
+        except OSError, e:
+            pass
+        b.close()
     except OSError, e:
         pass
-    os.close = lambda fd: ErrorRaiser.os_raise(errno.EPERM)
-    try:
-        BackgroundTasks._close(0)
-    except OSError, e:
-        pass
-    b = BackgroundTasks(background_thread=False)
-    try:
-        b._process_tasks(-1, [(0, lambda: None, (), {})])
-    except OSError, e:
-        pass
-    b.close()
-    sys.exit(0)
+    finally:
+        os.read, os.close = save_os_read, save_os_close
 
-if __name__ == "__main__":
-    unit_test()
+__name__ != "__main__" or test_backtask()
