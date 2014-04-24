@@ -169,14 +169,11 @@ class BackgroundTasks(object):
         self._lock = threading.Lock()
         if background_thread:
             self.__thread_lock = threading.Lock()
-            self.__thread_lock.acquire()
-            try:
-                self.__thread_pipe = os.pipe()
-                threading.Thread(target=self._thread).start()
-                # Wait the thread to start
-                os.read(self.__thread_pipe[0], 1)
-            finally:
-                self.__thread_lock.release()
+            self.__thread_pipe = os.pipe()
+            threading.Thread(target=self._thread).start()
+            # Wait the thread to acquire _thread_lock,
+            # so close() can wait on it.
+            os.read(self.__thread_pipe[0], 1)
             self._nonblock(self.__thread_pipe[1])
 
     def submit_task(self, func, *args, **kwds):
@@ -253,8 +250,7 @@ class BackgroundTasks(object):
             self._close(pipe[1])
             sys.stdout.flush()
             sys.stderr.flush()
-            (
-                (self.__coverage.stop(),) and
+            (   (self.__coverage.stop(),) and
                 (self.__coverage.save(),) and
                 os._exit(0))
         os.close(pipe[1])
@@ -349,27 +345,29 @@ class BackgroundTasks(object):
 
     def _thread(self):
         """Fire off worker processes in the background."""
-        # Tell main thread we have starteed.
-        os.write(self.__thread_pipe[1], "s")
         self.__thread_lock.acquire()
-        self._nonblock(self.__thread_pipe[0])
-        while True:
-            self._lock.acquire()
-            try:
-                rlist = list(self.__processes) + [self.__thread_pipe[0]]
-            finally:
-                self._lock.release()
-            # Wait until some child is ready, or the self.__process changes.
-            ready, _, _ = select.select(rlist, [], [])
-            if self.__thread_pipe[0] in ready:
-                ready.remove(self.__thread_pipe[0])
-                # Main thread closes the pipe to tell us to exit.
-                if self._read(self.__thread_pipe[0], 1) == "":
-                    break
-            if ready:
-                self._dispatch()
-        # Tell main thread we have exited.
-        self.__thread_lock.release()
+        try:
+            # Tell main thread we have starteed.
+            os.write(self.__thread_pipe[1], "s")
+            self._nonblock(self.__thread_pipe[0])
+            while True:
+                self._lock.acquire()
+                try:
+                    rlist = list(self.__processes) + [self.__thread_pipe[0]]
+                finally:
+                    self._lock.release()
+                # Wait until some child is ready, or the self.__process changes.
+                ready, _, _ = select.select(rlist, [], [])
+                if self.__thread_pipe[0] in ready:
+                    ready.remove(self.__thread_pipe[0])
+                    # Main thread closes the pipe to tell us to exit.
+                    if self._read(self.__thread_pipe[0], 1) == "":
+                        break
+                if ready:
+                    self._dispatch()
+        finally:
+            # Tell main thread we have exited.
+            self.__thread_lock.release()
 
     def _read(cls, fd, max_byte_count):
         """
