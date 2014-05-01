@@ -207,9 +207,10 @@ class BackgroundTasks(object):
         all tasks have completed the background tasks will fail with
         broken pipes."""
         if self.__thread_pipe is not None:
-            os.close(self.__thread_pipe[1])
+            os.write(self.__thread_pipe[1], "x")
             self.__thread_lock.acquire()
             self.__thread_lock.release()
+            os.close(self.__thread_pipe[1])
             os.close(self.__thread_pipe[0])
             self.__thread_pipe = None
         if self.__processes:
@@ -265,7 +266,7 @@ class BackgroundTasks(object):
         finally:
             self._lock.release()
         if self.__thread_pipe is not None:
-            os.write(self.__thread_pipe[1], "x")
+            os.write(self.__thread_pipe[1], "n")
 
     def _process_tasks(self, pipe, tasks):
         """
@@ -364,7 +365,7 @@ class BackgroundTasks(object):
             if self.__thread_pipe[0] in ready:
                 ready.remove(self.__thread_pipe[0])
                 # Main thread closes the pipe to tell us to exit.
-                if self._read(self.__thread_pipe[0], 1) == "":
+                if self._read(self.__thread_pipe[0], 1) == "x":
                     break
             if ready:
                 self._dispatch()
