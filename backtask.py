@@ -216,6 +216,14 @@ class BackgroundTasks(object):
                 os.close(r)
             self.__processes = None
 
+    def __len__(self):
+        self._lock.acquire()
+        try:
+            return len(self.__queue) + len(self.__results)
+        finally:
+            self._lock.release()
+
+
     def _dispatch(self):
         """See if any background tasks can be started."""
         self._poll()
@@ -478,6 +486,7 @@ def test_backtask():
     try:
         import time
         b = BackgroundTasks()
+        len(b)
         r = [b.submit_task(lambda i: i, i) for i in range(2)]
         r[0].on_complete = lambda _: sys.stdout.write('Hi 0!\n')
         sys.stdout.write('=====\n')
