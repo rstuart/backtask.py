@@ -170,10 +170,12 @@ class BackgroundTasks(object):
         if background_thread:
             self.__thread_lock = threading.Lock()
             self.__thread_pipe = os.pipe()
+            self.__thread_lock.acquire()
             threading.Thread(target=self._thread).start()
             # Wait the thread to acquire _thread_lock,
             # so close() can wait on it.
             os.read(self.__thread_pipe[0], 1)
+            self.__thread_lock.release()
             self._nonblock(self.__thread_pipe[1])
 
     def submit_task(self, func, *args, **kwds):
@@ -345,10 +347,10 @@ class BackgroundTasks(object):
 
     def _thread(self):
         """Fire off worker processes in the background."""
-        self.__thread_lock.acquire()
         try:
             # Tell main thread we have starteed.
             os.write(self.__thread_pipe[1], "s")
+            self.__thread_lock.acquire()
             self._nonblock(self.__thread_pipe[0])
             while True:
                 self._lock.acquire()
