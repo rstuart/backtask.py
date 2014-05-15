@@ -38,7 +38,7 @@
 # (at your option) any later version.
 #
 # As a special exception to the AGPLv3+, the author grants you permission
-# to redistribute this program without the accompanying ""Installation
+# to redistribute this program without the accompanying "Installation
 # Information" described in clause 6.
 #
 import cPickle
@@ -224,7 +224,7 @@ class BackgroundTasks(object):
         self._lock.acquire()
         try:
             # Is there work to be done?
-            if not self.__queue or len(self.__processes) == self.max_processes:
+            if not self.__queue or len(self.__processes) >= self.max_processes:
                 return
             # Pass an appropriate amount of work to the background task.
             if self.max_processes == 1:
