@@ -379,7 +379,7 @@ class BackgroundTasks(object):
                 if self.__thread_pipe[0] in ready:
                     ready.remove(self.__thread_pipe[0])
                     # Main thread closes the pipe to tell us to exit.
-                    if self._read(self.__thread_pipe[0], 1) == "":
+                    if self._read(self.__thread_pipe[0], 1) in ("", "x"):
                         break
                 if ready:
                     self._dispatch()
