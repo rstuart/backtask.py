@@ -38,7 +38,7 @@
 # (at your option) any later version.
 #
 # As a special exception to the AGPLv3+, the author grants you permission
-# to redistribute this program without the accompanying ""Installation
+# to redistribute this program without the accompanying "Installation
 # Information" described in clause 6.
 #
 import cPickle
@@ -213,9 +213,10 @@ class BackgroundTasks(object):
         all tasks have completed the background tasks will fail with
         broken pipes."""
         if self.__thread_pipe is not None:
-            os.close(self.__thread_pipe[1])
+            os.write(self.__thread_pipe[1], "x")
             self.__thread_lock.acquire()
             self.__thread_lock.release()
+            os.close(self.__thread_pipe[1])
             os.close(self.__thread_pipe[0])
             self.__thread_pipe = None
         if self.__processes:
@@ -237,7 +238,7 @@ class BackgroundTasks(object):
         self._lock.acquire()
         try:
             # Is there work to be done?
-            if not self.__queue or len(self.__processes) == self.max_processes:
+            if not self.__queue or len(self.__processes) >= self.max_processes:
                 return
             # Pass an appropriate amount of work to the background task.
             if self.max_processes == 1:
@@ -278,7 +279,7 @@ class BackgroundTasks(object):
         finally:
             self._lock.release()
         if self.__thread_pipe is not None:
-            os.write(self.__thread_pipe[1], "x")
+            os.write(self.__thread_pipe[1], "n")
 
     def _process_tasks(self, pipe, tasks):
         """
