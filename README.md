@@ -1,5 +1,7 @@
 backtask.py
 ===========
 
-Run functions asynchronously in a fork()'ed process, passing any data
-they need using the Unix fork() mechanism.
+Development for backtask.py has moved to Sourceforge.  It's
+new home page is:
+
+  http://backtask-py.sourceforge.net/
